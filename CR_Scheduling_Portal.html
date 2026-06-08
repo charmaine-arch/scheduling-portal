@@ -212,7 +212,7 @@ select:disabled { opacity: 0.45; cursor: not-allowed; }
   <div class="header-title">CR Scheduling Portal</div>
   <div id="fetch-error-banner" style="display:none;position:fixed;top:0;left:0;right:0;background:#B91C1C;color:white;text-align:center;padding:8px 16px;font-size:13px;font-weight:600;z-index:1000;"></div>
   <div id="preload-status" style="display:none;font-size:11px;color:rgba(255,255,255,0.8);margin-left:12px;font-family:Mulish,sans-serif;font-weight:600;white-space:nowrap;"></div>
-  <button id="refresh-btn" onclick="refreshAllData()" title="Refresh live schedule data" style="position:fixed;bottom:80px;right:16px;z-index:998;width:44px;height:44px;border-radius:50%;border:none;background:var(--blue);color:white;font-size:20px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.25);">&#8635;</button>
+  <button id="refresh-btn" onclick="refreshAllData()" title="Refresh live schedule data" style="position:fixed;bottom:80px;right:16px;z-index:998;height:40px;padding:0 14px;border-radius:20px;border:none;background:var(--blue);color:white;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.25);display:flex;align-items:center;gap:6px;">&#8635; Refresh Data</button>
   <button onclick="openHelp()" style="margin-left:auto;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);color:white;padding:7px 16px;border-radius:6px;font-family:Mulish,sans-serif;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:0.5px;white-space:nowrap;">&#10067; JIS Guide</button>
 </header>
 
@@ -1381,6 +1381,22 @@ function _doRunSearch(){
 
 function renderResults(subjectResults,allDP){
   const body=document.getElementById("results-body");body.innerHTML="";
+  // Add a refresh + re-search button at top of results
+  const rfBtn=document.createElement("button");
+  rfBtn.style="display:flex;align-items:center;gap:6px;margin:0 0 12px 0;padding:8px 16px;border-radius:20px;border:1.5px solid var(--blue);background:white;color:var(--blue);font-size:13px;font-weight:700;cursor:pointer;";
+  rfBtn.innerHTML="&#8635; Refresh live data & re-search";
+  rfBtn.onclick=function(){
+    const saved=[...STATE.proposalSlots];
+    Object.keys(scheduleCache).forEach(k=>delete scheduleCache[k]);
+    window._fetchErrors={};
+    Promise.allSettled(ALL_TUTORS.map(t=>fetchLiveSlots(t))).then(()=>{
+      _doRunSearch();
+      STATE.proposalSlots=saved;
+      updatePB();
+    });
+    rfBtn.disabled=true;rfBtn.style.opacity="0.5";rfBtn.innerHTML="&#8635; Refreshing...";
+  };
+  body.appendChild(rfBtn);
   let common=null;
   subjectResults.forEach(function(sr){
     const names=new Set(sr.tutorData.map(t=>t.tutor));
