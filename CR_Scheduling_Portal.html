@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CR Scheduling Portal</title>
+<!-- v20260609-0201 -->
 <link href="https://fonts.googleapis.com/css2?family=Mulish:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -396,7 +397,7 @@ select:disabled { opacity: 0.45; cursor: not-allowed; }
 </div>
 
 <script>
-const CAP = {
+const FALLBACK_CAP = {
   "Kania":   { "Math":           {fmt:"both", g:[1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},
                "General Science":{fmt:"both", g:[1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0]},
                "English":        {fmt:"both", g:[1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0]} },
@@ -434,6 +435,142 @@ const CAP = {
                "English":        {fmt:"both",   g:[1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0]} },
   "Amira":   { "Math":           {fmt:"both",   g:[1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]} }
 };
+// ── DYNAMIC CAP LOADING ──────────────────────────────────────────────────────
+const CAP_SHEET_ID = "1pi5qE4ICK1kBJlmreCETV5hmY25TB7z743nCXg-rFCE";
+let CAP = {}; // populated dynamically from Capability Matrix
+let ALL_TUTORS = []; // populated dynamically: in CAP with non-zero AND in Master Schedule
+let _capLoaded = false;
+let _capLoadPromise = null;
+
+// Map gviz col index (3-21) to grade key used in GRADE_IDX / GRADE_LEVEL_IDX
+const CAP_COL_TO_GRADE = [
+  // col3=KG, col4=Gr1, col5=Gr2, col6=Gr3, col7=Gr4, col8=Gr5
+  // col9=Gr6, col10=Gr7, col11=Gr8
+  // col12=Gr9 HS-L1, col13=Gr9 HS-L2
+  // col14=Gr10 HS-L1, col15=Gr10 HS-L2
+  // col16=Gr11 HS-L1, col17=Gr11 HS-L2, col18=Gr11 HS-L3
+  // col19=Gr12 HS-L1, col20=Gr12 HS-L2, col21=Gr12 HS-L3
+  "KG","Gr 1","Gr 2","Gr 3","Gr 4","Gr 5","Gr 6","Gr 7","Gr 8",
+  "Gr 9 L1","Gr 9 L2","Gr 10 L1","Gr 10 L2",
+  "Gr 11 L1","Gr 11 L2","Gr 11 L3",
+  "Gr 12 L1","Gr 12 L2","Gr 12 L3"
+]; // 19 entries for 19 grade cols
+
+function fetchCapabilityMatrix(){
+  if(_capLoadPromise) return _capLoadPromise;
+  _capLoadPromise = new Promise(function(resolve){
+    const cbName = "capCb_"+Date.now();
+    const bust = "&_="+Date.now();
+    const url = "https://docs.google.com/spreadsheets/d/"+CAP_SHEET_ID+"/gviz/tq?tqx=reqId:1;out:json;responseHandler:"+cbName+"&range=A2:V500"+bust;
+    const timeout = setTimeout(function(){
+      try{delete window[cbName];}catch(e){}
+      console.warn("CAP matrix fetch timed out, using fallback");
+      resolve(false);
+    }, 8000);
+    window[cbName] = function(json){
+      clearTimeout(timeout);
+      try{
+        delete window[cbName];
+        const rows = (json&&json.table&&json.table.rows)||[];
+        const newCAP = {};
+        rows.forEach(function(row){
+          const c = row.c||[];
+          const tutor = c[0]&&c[0].v ? c[0].v.toString().trim() : null;
+          const subject = c[1]&&c[1].v ? c[1].v.toString().trim() : null;
+          const fmt = c[2]&&c[2].v ? c[2].v.toString().trim() : "";
+          if(!tutor||!subject) return;
+          // Parse format
+          let fmtKey = "both";
+          if(fmt.toLowerCase().includes("online only")||fmt.toLowerCase()==="online") fmtKey="online";
+          // Parse 19 grade values (cols 3-21)
+          const g = [];
+          for(let i=3;i<=21;i++){
+            const val = c[i]&&c[i].v!==null&&c[i].v!==undefined ? parseInt(c[i].v)||0 : 0;
+            g.push(val);
+          }
+          if(!newCAP[tutor]) newCAP[tutor] = {};
+          newCAP[tutor][subject] = {fmt:fmtKey, g:g};
+        });
+        // Only keep tutors with at least one non-zero value across all subjects
+        const activeTutors = Object.keys(newCAP).filter(function(t){
+          return Object.values(newCAP[t]).some(function(s){
+            return s.g.some(function(v){return v>0;});
+          });
+        });
+        if(activeTutors.length > 0){
+          Object.assign(CAP, newCAP);
+          _capLoaded = true;
+          console.log("CAP loaded dynamically:", activeTutors.length, "tutors:", activeTutors.join(", "));
+          resolve(true);
+        } else {
+          console.warn("CAP fetch returned empty, using fallback");
+          resolve(false);
+        }
+      }catch(e){
+        console.error("CAP parse error:", e);
+        resolve(false);
+      }
+    };
+    const s = document.createElement("script");
+    s.src = url;
+    s.onerror = function(){ clearTimeout(timeout); resolve(false); };
+    document.head.appendChild(s);
+  });
+  return _capLoadPromise;
+}
+
+// Cross-check CAP tutors vs Master Schedule DATA tabs
+// Returns {onlyInCAP: [], onlyInSchedule: [], inBoth: []}
+function crossCheckTutors(capTutors, scheduleTutors){
+  const capSet = new Set(capTutors.map(t=>t.toUpperCase()));
+  const schedSet = new Set(scheduleTutors.map(t=>t.toUpperCase()));
+  // Map back to original casing
+  const capMap = {};
+  capTutors.forEach(t=>capMap[t.toUpperCase()]=t);
+  const schedMap = {};
+  scheduleTutors.forEach(t=>schedMap[t.toUpperCase()]=t);
+  return {
+    onlyInCAP: capTutors.filter(t=>!schedSet.has(t.toUpperCase())),
+    onlyInSchedule: scheduleTutors.filter(t=>!capSet.has(t.toUpperCase())),
+    inBoth: capTutors.filter(t=>schedSet.has(t.toUpperCase()))
+  };
+}
+
+// Detect active tutors from Master Schedule by checking which DATA tabs exist and return data
+// We probe each tutor name from CAP; if their JSONP fetch returns rows, they're active
+async function detectActiveScheduleTutors(capTutors){
+  const results = await Promise.allSettled(capTutors.map(function(tutor){
+    return new Promise(function(resolve){
+      const tab = tutor.toUpperCase()+" DATA";
+      const cbName = "probeCb_"+tutor+"_"+Date.now();
+      const url = "https://docs.google.com/spreadsheets/d/"+SHEET_ID+"/gviz/tq?tqx=reqId:1;out:json;responseHandler:"+cbName+"&sheet="+encodeURIComponent(tab)+"&range=A2:E5&_="+Date.now();
+      const timeout = setTimeout(function(){
+        try{delete window[cbName];}catch(e){}
+        resolve({tutor:tutor, active:false, reason:"timeout"});
+      }, 6000);
+      window[cbName] = function(json){
+        clearTimeout(timeout);
+        try{
+          delete window[cbName];
+          const rows = (json&&json.table&&json.table.rows)||[];
+          // Active if we got rows AND they have actual content (not just nulls)
+          const hasContent = rows.some(function(r){
+            return r.c&&r.c[0]&&r.c[0].v;
+          });
+          resolve({tutor:tutor, active:hasContent, reason:hasContent?"ok":"no data"});
+        }catch(e){
+          resolve({tutor:tutor, active:false, reason:"error"});
+        }
+      };
+      const s = document.createElement("script");
+      s.src = url;
+      s.onerror = function(){clearTimeout(timeout); resolve({tutor:tutor, active:false, reason:"error"});};
+      document.head.appendChild(s);
+    });
+  }));
+  return results.map(r=>r.value||r.reason);
+}
+
 
 const GRADE_IDX={"KG":0,"Gr 1":1,"Gr 2":2,"Gr 3":3,"Gr 4":4,"Gr 5":5,"Gr 6":6,"Gr 7":7,"Gr 8":8};
 const GRADE_LEVEL_IDX={"Gr 9":{"HS - L1":9,"HS - L2":10},"Gr 10":{"HS - L1":11,"HS - L2":12},"Gr 11":{"HS - L1":13,"HS - L2":14,"HS - L3":15},"Gr 12":{"HS - L1":16,"HS - L2":17,"HS - L3":18}};
@@ -811,7 +948,7 @@ const TEST_SCHEDULES={
 const SHEET_ID="1ZpbWgIxQmdVp0-tHYqhGjqpmuQOVaiXIs7iCe1oWR-g";
 const API_KEY="AIzaSyDc4ILoxW0ESAVk1IV0z6wDCreEdjsRhP4";
 const scheduleCache={};
-const ALL_TUTORS=["Kania","Jeremia","Arief","Rizal","Michael","Millenia","Adi","Aifa","Haryo","Odelia","Victor","Vinka","Darren","Amira"];
+const FALLBACK_TUTORS=["Kania","Jeremia","Arief","Rizal","Michael","Millenia","Adi","Aifa","Haryo","Odelia","Victor","Vinka","Darren","Amira"];
 
 function getMockSlots(t){
   if(TEST_SCHEDULES[t]) return TEST_SCHEDULES[t];
@@ -890,11 +1027,11 @@ async function fetchLiveSlots(tutorName){
   }
 }
 
-function showPreloadStatus(loaded,total){
+function showPreloadStatus(loaded,total,msg){
   const el=document.getElementById("preload-status");
   if(!el) return;
   if(loaded<total){
-    el.textContent="Loading schedules... "+loaded+"/"+total;
+    el.textContent=msg||("Loading schedules... "+loaded+"/"+total);
     el.style.display="block";
   } else {
     const errCount=Object.keys(window._fetchErrors||{}).length;
@@ -1270,6 +1407,33 @@ function matchTutors(subject,grade,level,format){
   return res.sort((a,b)=>a.priority-b.priority);
 }
 
+function _slotStartMins(timeSlot){
+  // Parse start time from "HH:MM - HH:MM" or "HH:MM - HH:MM" format
+  var m=timeSlot&&timeSlot.match(/^(\d{1,2}):(\d{2})/);
+  if(!m) return -1;
+  return parseInt(m[1])*60+parseInt(m[2]);
+}
+function _rangeStartMins(timeSlot){
+  return _slotStartMins(timeSlot);
+}
+function _rangeEndMins(timeSlot){
+  // Parse end time from "HH:MM - HH:MM"
+  var m=timeSlot&&timeSlot.match(/-(\d{1,2}):(\d{2})\s*$/);
+  if(!m) return -1;
+  return parseInt(m[1])*60+parseInt(m[2]);
+}
+function slotStartsWithinPrefs(slotTimeStr, prefSlots){
+  // A slot qualifies if its START TIME falls within ANY of the selected time ranges
+  // e.g. slot "17:30 - 18:30" qualifies if "17:00 - 18:00" is selected (17:30 is within 17:00-18:00)
+  var slotStart = _slotStartMins(slotTimeStr);
+  if(slotStart < 0) return false;
+  return prefSlots.some(function(pref){
+    var rangeStart = _rangeStartMins(pref);
+    var rangeEnd   = _rangeEndMins(pref);
+    if(rangeStart < 0 || rangeEnd < 0) return false;
+    return slotStart >= rangeStart && slotStart < rangeEnd;
+  });
+}
 function filterSlots(slots,format,dayPrefs,blockedSlots){
   blockedSlots=blockedSlots||[];
   const pd=Object.keys(dayPrefs||{}).filter(d=>dayPrefs[d]&&dayPrefs[d].length>0);
@@ -1278,7 +1442,10 @@ function filterSlots(slots,format,dayPrefs,blockedSlots){
     if(s.status==="Releasing Soon"&&!isWithinLookAhead(s.releaseDate)) return false;
     if(format==="classroom"&&s.status==="Open - Online Only") return false;
     if(blockedSlots.some(b=>b.day===s.day&&b.time===s.timeSlot)) return false;
-    if(pd.length>0){if(!dayPrefs[s.day]||!dayPrefs[s.day].includes(s.timeSlot)) return false;}
+    if(pd.length>0){
+      if(!dayPrefs[s.day]) return false;
+      if(!slotStartsWithinPrefs(s.timeSlot, dayPrefs[s.day])) return false;
+    }
     return true;
   });
 }
@@ -1397,6 +1564,23 @@ function renderResults(subjectResults,allDP){
     rfBtn.disabled=true;rfBtn.style.opacity="0.5";rfBtn.innerHTML="&#8635; Refreshing...";
   };
   body.appendChild(rfBtn);
+  // Show tutor inconsistency warnings if any
+  if(window._tutorInconsistencies){
+    const inc = window._tutorInconsistencies;
+    const warnings = [];
+    if(inc.inCAPNoSchedule && inc.inCAPNoSchedule.length>0){
+      warnings.push("⚠️ In Capability Matrix but no schedule data: "+inc.inCAPNoSchedule.join(", "));
+    }
+    if(inc.inScheduleNotCAP && inc.inScheduleNotCAP.length>0){
+      warnings.push("⚠️ Has schedule but missing from Capability Matrix: "+inc.inScheduleNotCAP.join(", "));
+    }
+    if(warnings.length>0){
+      const warnDiv=document.createElement("div");
+      warnDiv.style="background:#FEF3C7;border:1.5px solid #F59E0B;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#92400E;line-height:1.6;";
+      warnDiv.innerHTML="<strong>Team note:</strong><br>"+warnings.join("<br>");
+      body.appendChild(warnDiv);
+    }
+  }
   let common=null;
   subjectResults.forEach(function(sr){
     const names=new Set(sr.tutorData.map(t=>t.tutor));
@@ -1404,22 +1588,31 @@ function renderResults(subjectResults,allDP){
     else common=new Set([...common].filter(n=>names.has(n)));
   });
   const hasCommon=common&&common.size>0;
-  const tabs=document.createElement("div");tabs.className="scenario-tabs";
-  tabs.innerHTML='<div class="sc-tab active" id="tab-same" onclick="switchRT(&apos;same&apos;)">'+(hasCommon?"&#x2705; ":"")+'Same Tutor for All</div><div class="sc-tab" id="tab-alt" onclick="switchRT(&apos;alt&apos;)">Best Tutor Per Subject</div>';
-  body.appendChild(tabs);
-  const sp=document.createElement("div");sp.className="sc-panel active";sp.id="panel-same";
-  if(!hasCommon){
-    sp.innerHTML='<div class="sc-desc amber">No single tutor qualifies for all subjects.</div>';
+  const singleSubject=subjectResults.length===1;
+  if(singleSubject){
+    // Single subject: skip tabs entirely, just show results directly
+    const sp=document.createElement("div");sp.className="sc-panel active";sp.id="panel-same";
     renderPerSubj(sp,subjectResults,allDP);
+    body.appendChild(sp);
   }else{
-    sp.innerHTML='<div class="sc-desc green">&#x2705; Tutors who can cover all subjects:</div>';
-    renderCommon(sp,common,subjectResults,allDP);
+    // Multiple subjects: show both tabs
+    const tabs=document.createElement("div");tabs.className="scenario-tabs";
+    tabs.innerHTML='<div class="sc-tab active" id="tab-same" onclick="switchRT(&apos;same&apos;)">'+(hasCommon?"&#x2705; ":"")+'Same Tutor for All</div><div class="sc-tab" id="tab-alt" onclick="switchRT(&apos;alt&apos;)">Best Tutor Per Subject</div>';
+    body.appendChild(tabs);
+    const sp=document.createElement("div");sp.className="sc-panel active";sp.id="panel-same";
+    if(!hasCommon){
+      sp.innerHTML='<div class="sc-desc amber">No single tutor qualifies for all subjects.</div>';
+      renderPerSubj(sp,subjectResults,allDP);
+    }else{
+      sp.innerHTML='<div class="sc-desc green">&#x2705; Tutors who can cover all subjects:</div>';
+      renderCommon(sp,common,subjectResults,allDP);
+    }
+    body.appendChild(sp);
+    const ap=document.createElement("div");ap.className="sc-panel";ap.id="panel-alt";
+    ap.innerHTML='<div class="sc-desc blue">Best tutor per subject.</div>';
+    renderPerSubj(ap,subjectResults,allDP);
+    body.appendChild(ap);
   }
-  body.appendChild(sp);
-  const ap=document.createElement("div");ap.className="sc-panel";ap.id="panel-alt";
-  ap.innerHTML='<div class="sc-desc blue">Best tutor per subject.</div>';
-  renderPerSubj(ap,subjectResults,allDP);
-  body.appendChild(ap);
 }
 
 function renderCommon(container,common,subjectResults,allDP){
